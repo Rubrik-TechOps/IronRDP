@@ -70,6 +70,7 @@ struct SessionBuilderInner {
     use_display_control: bool,
     enable_credssp: bool,
     outbound_message_size_limit: Option<usize>,
+    performance_flags: u32,
 }
 
 impl Default for SessionBuilderInner {
@@ -98,6 +99,7 @@ impl Default for SessionBuilderInner {
             use_display_control: false,
             enable_credssp: true,
             outbound_message_size_limit: None,
+            performance_flags: PerformanceFlags::default().bits(),
         }
     }
 }
@@ -224,6 +226,12 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
                 };
                 self.0.borrow_mut().outbound_message_size_limit = if limit > 0 { Some(limit) } else { None };
             };
+            |performance_flags: f64| {
+                #[expect(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let flags = performance_flags as u32;
+                debug!(performance_flags = flags, "Setting performance flags");
+                self.0.borrow_mut().performance_flags = flags;
+            };
         }
 
         self.clone()
@@ -247,6 +255,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             remote_clipboard_changed_callback,
             force_clipboard_update_callback,
             outbound_message_size_limit,
+            performance_flags,
         );
 
         {
@@ -276,11 +285,12 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             remote_clipboard_changed_callback = inner.remote_clipboard_changed_callback.clone();
             force_clipboard_update_callback = inner.force_clipboard_update_callback.clone();
             outbound_message_size_limit = inner.outbound_message_size_limit;
+            performance_flags = inner.performance_flags;
         }
 
         info!("Connect to RDP host");
 
-        let mut config = build_config(username, password, server_domain, client_name, desktop_size);
+        let mut config = build_config(username, password, server_domain, client_name, desktop_size, performance_flags);
 
         let enable_credssp = self.0.borrow().enable_credssp;
         config.enable_credssp = enable_credssp;
@@ -872,6 +882,7 @@ fn build_config(
     domain: Option<String>,
     client_name: String,
     desktop_size: DesktopSize,
+    performance_flags: u32,
 ) -> connector::Config {
     connector::Config {
         credentials: Credentials::UsernamePassword { username, password },
@@ -914,7 +925,7 @@ fn build_config(
         request_data: None,
         pointer_software_rendering: false,
         multitransport_flags: None,
-        performance_flags: PerformanceFlags::default(),
+        performance_flags: PerformanceFlags::from_bits_truncate(performance_flags),
         desktop_scale_factor: 0,
         hardware_id: None,
         license_cache: None,
