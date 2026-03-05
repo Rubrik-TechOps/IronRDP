@@ -167,6 +167,14 @@ export class RemoteDesktopService {
             sessionBuilder.canvasResizedCallback(this.onCanvasResized);
         }
 
+        // Network statistics callbacks (RX/TX)
+        if (config.bytesReceivedCallback != null) {
+            sessionBuilder.bytesReceivedCallback(config.bytesReceivedCallback);
+        }
+        if (config.bytesSentCallback != null) {
+            sessionBuilder.bytesSentCallback(config.bytesSentCallback);
+        }
+
         if (config.desktopSize != null) {
             sessionBuilder.desktopSize(
                 new this.module.DesktopSize(config.desktopSize.width, config.desktopSize.height),

@@ -43,3 +43,7 @@ export function outboundMessageSizeLimit(limit: number): Extension {
 export function enableCredssp(enable: boolean): Extension {
     return new Extension('enable_credssp', enable);
 }
+
+export function performanceFlags(flags: number): Extension {
+    return new Extension('performance_flags', flags);
+}

@@ -10,6 +10,8 @@ export class Config {
     readonly authToken: string;
     readonly desktopSize?: DesktopSize;
     readonly extensions: Extension[];
+    readonly bytesReceivedCallback?: (bytes: number) => void;
+    readonly bytesSentCallback?: (bytes: number) => void;
 
     constructor(
         userData: { username: string; password: string },
@@ -19,6 +21,8 @@ export class Config {
             serverDomain: string;
             extensions: Extension[];
             desktopSize?: DesktopSize;
+            bytesReceivedCallback?: (bytes: number) => void;
+            bytesSentCallback?: (bytes: number) => void;
         },
     ) {
         this.username = userData.username;
@@ -29,5 +33,7 @@ export class Config {
         this.serverDomain = configOptions.serverDomain;
         this.extensions = configOptions.extensions;
         this.desktopSize = configOptions.desktopSize;
+        this.bytesReceivedCallback = configOptions.bytesReceivedCallback;
+        this.bytesSentCallback = configOptions.bytesSentCallback;
     }
 }

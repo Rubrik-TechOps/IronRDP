@@ -282,6 +282,16 @@ macro_rules! make_bridge {
                 Self($crate::SessionBuilder::canvas_resized_callback(&self.0, callback))
             }
 
+            #[wasm_bindgen(js_name = bytesReceivedCallback)]
+            pub fn bytes_received_callback(&self, callback: $crate::internal::web_sys::js_sys::Function) -> Self {
+                Self($crate::SessionBuilder::bytes_received_callback(&self.0, callback))
+            }
+
+            #[wasm_bindgen(js_name = bytesSentCallback)]
+            pub fn bytes_sent_callback(&self, callback: $crate::internal::web_sys::js_sys::Function) -> Self {
+                Self($crate::SessionBuilder::bytes_sent_callback(&self.0, callback))
+            }
+
             pub fn extension(&self, ext: $crate::Extension) -> Self {
                 Self($crate::SessionBuilder::extension(&self.0, ext))
             }

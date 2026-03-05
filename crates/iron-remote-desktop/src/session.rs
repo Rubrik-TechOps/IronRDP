@@ -52,6 +52,12 @@ pub trait SessionBuilder {
     fn canvas_resized_callback(&self, callback: js_sys::Function) -> Self;
 
     #[must_use]
+    fn bytes_received_callback(&self, callback: js_sys::Function) -> Self;
+
+    #[must_use]
+    fn bytes_sent_callback(&self, callback: js_sys::Function) -> Self;
+
+    #[must_use]
     fn extension(&self, ext: Extension) -> Self;
 
     #[expect(async_fn_in_trait)]

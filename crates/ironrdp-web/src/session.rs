@@ -67,6 +67,10 @@ struct SessionBuilderInner {
     remote_clipboard_changed_callback: Option<js_sys::Function>,
     force_clipboard_update_callback: Option<js_sys::Function>,
 
+    // Network statistics callbacks
+    bytes_received_callback: Option<js_sys::Function>,
+    bytes_sent_callback: Option<js_sys::Function>,
+
     use_display_control: bool,
     enable_credssp: bool,
     outbound_message_size_limit: Option<usize>,
@@ -95,6 +99,9 @@ impl Default for SessionBuilderInner {
             set_cursor_style_callback_context: None,
             remote_clipboard_changed_callback: None,
             force_clipboard_update_callback: None,
+
+            bytes_received_callback: None,
+            bytes_sent_callback: None,
 
             use_display_control: false,
             enable_credssp: true,
@@ -209,6 +216,18 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
         self.clone()
     }
 
+    /// Optional: callback for reporting bytes received (RX)
+    fn bytes_received_callback(&self, callback: js_sys::Function) -> Self {
+        self.0.borrow_mut().bytes_received_callback = Some(callback);
+        self.clone()
+    }
+
+    /// Optional: callback for reporting bytes sent (TX)
+    fn bytes_sent_callback(&self, callback: js_sys::Function) -> Self {
+        self.0.borrow_mut().bytes_sent_callback = Some(callback);
+        self.clone()
+    }
+
     fn extension(&self, ext: Extension) -> Self {
         iron_remote_desktop::extension_match! {
             match ext;
@@ -254,6 +273,8 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             set_cursor_style_callback_context,
             remote_clipboard_changed_callback,
             force_clipboard_update_callback,
+            bytes_received_callback,
+            bytes_sent_callback,
             outbound_message_size_limit,
             performance_flags,
         );
@@ -284,6 +305,8 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
                 .context("set_cursor_style_callback_context missing")?;
             remote_clipboard_changed_callback = inner.remote_clipboard_changed_callback.clone();
             force_clipboard_update_callback = inner.force_clipboard_update_callback.clone();
+            bytes_received_callback = inner.bytes_received_callback.clone();
+            bytes_sent_callback = inner.bytes_sent_callback.clone();
             outbound_message_size_limit = inner.outbound_message_size_limit;
             performance_flags = inner.performance_flags;
         }
@@ -365,6 +388,9 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             set_cursor_style_callback,
             set_cursor_style_callback_context,
 
+            bytes_received_callback,
+            bytes_sent_callback,
+
             input_events_rx: RefCell::new(Some(input_events_rx)),
             rdp_reader: RefCell::new(Some(rdp_reader)),
             connection_result: RefCell::new(Some(connection_result)),
@@ -408,6 +434,10 @@ pub(crate) struct Session {
     render_canvas: HtmlCanvasElement,
     set_cursor_style_callback: js_sys::Function,
     set_cursor_style_callback_context: JsValue,
+
+    // Network statistics callbacks
+    bytes_received_callback: Option<js_sys::Function>,
+    bytes_sent_callback: Option<js_sys::Function>,
 
     // Consumed when `run` is called
     input_events_rx: RefCell<Option<mpsc::UnboundedReceiver<RdpInputEvent>>>,
@@ -515,6 +545,11 @@ impl iron_remote_desktop::Session for Session {
                     let (action, payload) = frame.context("read frame")?;
                     trace!(?action, frame_length = payload.len(), "Frame received");
 
+                    // Report bytes received (RX)
+                    if let Some(ref callback) = self.bytes_received_callback {
+                        let _ = callback.call1(&JsValue::NULL, &JsValue::from(payload.len() as u32));
+                    }
+
                     active_stage.process(&mut image, action, &payload)?
                 }
                 input_events = input_events.next() => {
@@ -607,6 +642,10 @@ impl iron_remote_desktop::Session for Session {
             for out in outputs {
                 match out {
                     ActiveStageOutput::ResponseFrame(frame) => {
+                        // Report bytes sent (TX)
+                        if let Some(ref callback) = self.bytes_sent_callback {
+                            let _ = callback.call1(&JsValue::NULL, &JsValue::from(frame.len() as u32));
+                        }
                         self.writer_tx
                             .unbounded_send(frame)
                             .context("Send frame to writer task")?;

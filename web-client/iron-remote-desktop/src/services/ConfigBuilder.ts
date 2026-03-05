@@ -25,6 +25,8 @@ export class ConfigBuilder {
     private authToken: string = '';
     private desktopSize?: DesktopSize;
     private extensions: Extension[] = [];
+    private _bytesReceivedCallback?: (bytes: number) => void;
+    private _bytesSentCallback?: (bytes: number) => void;
 
     /**
      * Creates a new ConfigBuilder instance.
@@ -120,6 +122,42 @@ export class ConfigBuilder {
     }
 
     /**
+     * Optional callback for tracking bytes received (RX)
+     *
+     * @param callback - Function called with number of bytes received
+     * @returns The builder instance for method chaining
+     */
+    bytesReceivedCallback(callback: (bytes: number) => void): ConfigBuilder {
+        this._bytesReceivedCallback = callback;
+        return this;
+    }
+
+    /**
+     * Optional callback for tracking bytes sent (TX)
+     *
+     * @param callback - Function called with number of bytes sent
+     * @returns The builder instance for method chaining
+     */
+    bytesSentCallback(callback: (bytes: number) => void): ConfigBuilder {
+        this._bytesSentCallback = callback;
+        return this;
+    }
+
+    /**
+     * Get the bytes received callback
+     */
+    getBytesReceivedCallback(): ((bytes: number) => void) | undefined {
+        return this._bytesReceivedCallback;
+    }
+
+    /**
+     * Get the bytes sent callback
+     */
+    getBytesSentCallback(): ((bytes: number) => void) | undefined {
+        return this._bytesSentCallback;
+    }
+
+    /**
      * Builds a new Config instance.
      *
      * @throws {Error} If required parameters (destination, proxyAddress, authToken) are not set
@@ -143,6 +181,8 @@ export class ConfigBuilder {
             serverDomain: this.serverDomain,
             extensions: this.extensions,
             desktopSize: this.desktopSize,
+            bytesReceivedCallback: this._bytesReceivedCallback,
+            bytesSentCallback: this._bytesSentCallback,
         };
 
         return new Config(userData, proxyData, configOptions);
