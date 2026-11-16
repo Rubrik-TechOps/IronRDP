@@ -18,7 +18,7 @@ use tracing::{debug, info};
 
 use crate::fast_path::UpdateKind;
 use crate::image::DecodedImage;
-use crate::{fast_path, x224, SessionError, SessionErrorExt as _, SessionResult};
+use crate::{fast_path, reason_err, x224, SessionError, SessionErrorExt as _, SessionResult};
 
 /// Converts the PDU-layer compression type to the bulk crate's compression type.
 fn to_bulk_compression_type(ct: PduCompressionType) -> ironrdp_bulk::CompressionType {
@@ -144,13 +144,19 @@ impl ActiveStage {
                 )
             }
             Action::X224 => {
-                let outputs = self
-                    .x224_processor
-                    .process(frame)?
-                    .into_iter()
-                    .map(TryFrom::try_from)
-                    .collect::<Result<Vec<_>, _>>()?;
-                (outputs, Vec::new())
+                let mut outputs = Vec::new();
+                let mut updates = Vec::new();
+                for processor_output in self.x224_processor.process(frame)? {
+                    match processor_output {
+                        // Graphics sent over slow path: drawn by the fast-path processor,
+                        // which owns the decoders for the image.
+                        x224::ProcessorOutput::SlowPathUpdate(data) => {
+                            updates.extend(self.fast_path_processor.process_slow_path_update(image, &data)?);
+                        }
+                        other => outputs.push(ActiveStageOutput::try_from(other)?),
+                    }
+                }
+                (outputs, updates)
             }
         };
 
@@ -326,6 +332,11 @@ impl TryFrom<x224::ProcessorOutput> for ActiveStageOutput {
             }
             x224::ProcessorOutput::DeactivateAll(cas) => Ok(Self::DeactivateAll(cas)),
             x224::ProcessorOutput::MultitransportRequest(pdu) => Ok(Self::MultitransportRequest(pdu)),
+            // Handled in ActiveStage::process, which has the image to draw on.
+            x224::ProcessorOutput::SlowPathUpdate(_) => Err(reason_err!(
+                "ActiveStage",
+                "slow-path update must be processed with an image"
+            )),
         }
     }
 }

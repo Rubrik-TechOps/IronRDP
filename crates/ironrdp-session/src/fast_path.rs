@@ -6,6 +6,7 @@ use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_graphics::pointer::{DecodedPointer, PointerBitmapTarget};
 use ironrdp_graphics::rdp6::BitmapStreamDecoder;
 use ironrdp_graphics::rle::RlePixelFormat;
+use ironrdp_pdu::bitmap::BitmapUpdateData;
 use ironrdp_pdu::codecs::rfx::FrameAcknowledgePdu;
 use ironrdp_pdu::fast_path::{FastPathHeader, FastPathUpdate, FastPathUpdatePdu, Fragmentation};
 use ironrdp_pdu::geometry::{InclusiveRectangle, Rectangle as _};
@@ -147,116 +148,7 @@ impl Processor {
                 processor_updates.push(UpdateKind::Region(update_region));
             }
             Ok(FastPathUpdate::Bitmap(bitmap_update)) => {
-                trace!("Received bitmap update");
-
-                let mut buf = Vec::new();
-                let mut update_kind = UpdateKind::None;
-
-                for update in bitmap_update.rectangles {
-                    trace!("{update:?}");
-                    buf.clear();
-
-                    // Bitmap data is either compressed or uncompressed, depending
-                    // on whether the BITMAP_COMPRESSION flag is present in the
-                    // flags field.
-                    let update_rectangle = if update
-                        .compression_flags
-                        .contains(ironrdp_pdu::bitmap::Compression::BITMAP_COMPRESSION)
-                    {
-                        if update.bits_per_pixel == 32 {
-                            // Compressed bitmaps at a color depth of 32 bpp are compressed using RDP 6.0
-                            // Bitmap Compression and stored inside an RDP 6.0 Bitmap Compressed Stream
-                            // structure ([MS-RDPEGDI] section 2.2.2.5.1).
-                            debug!("32 bpp compressed RDP6_BITMAP_STREAM");
-
-                            match self.bitmap_stream_decoder.decode_bitmap_stream_to_rgb24(
-                                update.bitmap_data,
-                                &mut buf,
-                                usize::from(update.width),
-                                usize::from(update.height),
-                            ) {
-                                Ok(()) => image.apply_rgb24(&buf, &update.rectangle, true)?,
-                                Err(err) => {
-                                    warn!("Invalid RDP6_BITMAP_STREAM: {err}");
-                                    update.rectangle.clone()
-                                }
-                            }
-                        } else {
-                            // Compressed bitmaps not in 32 bpp format are compressed using Interleaved
-                            // RLE and encapsulated in an RLE Compressed Bitmap Stream structure (section
-                            // 2.2.9.1.1.3.1.2.4).
-                            debug!(bpp = update.bits_per_pixel, "Non-32 bpp compressed RLE_BITMAP_STREAM",);
-
-                            match ironrdp_graphics::rle::decompress(
-                                update.bitmap_data,
-                                &mut buf,
-                                usize::from(update.width),
-                                usize::from(update.height),
-                                usize::from(update.bits_per_pixel),
-                            ) {
-                                Ok(RlePixelFormat::Rgb16) => image.apply_rgb16_bitmap(&buf, &update.rectangle)?,
-
-                                // TODO: support other pixel formats…
-                                Ok(format @ (RlePixelFormat::Rgb8 | RlePixelFormat::Rgb15 | RlePixelFormat::Rgb24)) => {
-                                    warn!("Received RLE-compressed bitmap with unsupported color depth: {format:?}");
-                                    update.rectangle.clone()
-                                }
-
-                                Err(e) => {
-                                    warn!("Invalid RLE-compressed bitmap: {e}");
-                                    update.rectangle.clone()
-                                }
-                            }
-                        }
-                    } else {
-                        // Uncompressed bitmap data is formatted as a bottom-up, left-to-right series of
-                        // pixels. Each pixel is a whole number of bytes. Each row contains a multiple of
-                        // four bytes (including up to three bytes of padding, as necessary).
-                        // [MS-RDPBCGR] 2.2.9.1.1.3.1.2.2
-                        trace!("Uncompressed raw bitmap");
-
-                        let bpp = usize::from(update.bits_per_pixel);
-                        let width = usize::from(update.width);
-                        let bytes_per_pixel = bpp.div_ceil(8);
-                        let row_bytes = width * bytes_per_pixel;
-                        let padded_row_bytes = (row_bytes + 3) & !3;
-
-                        if padded_row_bytes != row_bytes {
-                            // Strip per-row padding before passing to the bitmap apply functions,
-                            // which expect tightly packed pixel data.
-                            buf.clear();
-                            for row in update.bitmap_data.chunks(padded_row_bytes) {
-                                let end = row_bytes.min(row.len());
-                                buf.extend_from_slice(&row[..end]);
-                            }
-
-                            match update.bits_per_pixel {
-                                16 => image.apply_rgb16_bitmap(&buf, &update.rectangle)?,
-                                _ => {
-                                    warn!("Unsupported uncompressed bitmap depth: {bpp} bpp");
-                                    update.rectangle.clone()
-                                }
-                            }
-                        } else {
-                            match update.bits_per_pixel {
-                                16 => image.apply_rgb16_bitmap(update.bitmap_data, &update.rectangle)?,
-                                _ => {
-                                    warn!("Unsupported uncompressed bitmap depth: {bpp} bpp");
-                                    update.rectangle.clone()
-                                }
-                            }
-                        }
-                    };
-
-                    match update_kind {
-                        UpdateKind::Region(current) => {
-                            update_kind = UpdateKind::Region(current.union(&update_rectangle))
-                        }
-                        _ => update_kind = UpdateKind::Region(update_rectangle),
-                    }
-                }
-
-                processor_updates.push(update_kind);
+                processor_updates.push(self.apply_bitmap_update(image, bitmap_update)?);
             }
             Ok(FastPathUpdate::Pointer(update)) => {
                 if !self.enable_server_pointer {
@@ -390,6 +282,171 @@ impl Processor {
         };
 
         Ok(processor_updates)
+    }
+
+    /// Draw a bitmap update (TS_UPDATE_BITMAP_DATA) onto the image. Shared by the
+    /// fast-path and slow-path update paths: both carry the same structure.
+    fn apply_bitmap_update(
+        &mut self,
+        image: &mut DecodedImage,
+        bitmap_update: BitmapUpdateData<'_>,
+    ) -> SessionResult<UpdateKind> {
+        trace!("Received bitmap update");
+
+        let mut buf = Vec::new();
+        let mut update_kind = UpdateKind::None;
+
+        for update in bitmap_update.rectangles {
+            trace!("{update:?}");
+            buf.clear();
+
+            // Bitmap data is either compressed or uncompressed, depending
+            // on whether the BITMAP_COMPRESSION flag is present in the
+            // flags field.
+            let update_rectangle = if update
+                .compression_flags
+                .contains(ironrdp_pdu::bitmap::Compression::BITMAP_COMPRESSION)
+            {
+                if update.bits_per_pixel == 32 {
+                    // Compressed bitmaps at a color depth of 32 bpp are compressed using RDP 6.0
+                    // Bitmap Compression and stored inside an RDP 6.0 Bitmap Compressed Stream
+                    // structure ([MS-RDPEGDI] section 2.2.2.5.1).
+                    debug!("32 bpp compressed RDP6_BITMAP_STREAM");
+
+                    match self.bitmap_stream_decoder.decode_bitmap_stream_to_rgb24(
+                        update.bitmap_data,
+                        &mut buf,
+                        usize::from(update.width),
+                        usize::from(update.height),
+                    ) {
+                        Ok(()) => image.apply_rgb24(&buf, &update.rectangle, true)?,
+                        Err(err) => {
+                            warn!("Invalid RDP6_BITMAP_STREAM: {err}");
+                            update.rectangle.clone()
+                        }
+                    }
+                } else {
+                    // Compressed bitmaps not in 32 bpp format are compressed using Interleaved
+                    // RLE and encapsulated in an RLE Compressed Bitmap Stream structure (section
+                    // 2.2.9.1.1.3.1.2.4).
+                    debug!(bpp = update.bits_per_pixel, "Non-32 bpp compressed RLE_BITMAP_STREAM",);
+
+                    match ironrdp_graphics::rle::decompress(
+                        update.bitmap_data,
+                        &mut buf,
+                        usize::from(update.width),
+                        usize::from(update.height),
+                        usize::from(update.bits_per_pixel),
+                    ) {
+                        Ok(RlePixelFormat::Rgb16) => image.apply_rgb16_bitmap(&buf, &update.rectangle)?,
+
+                        // 24 bpp interleaved RLE decodes to bottom-up rows of B,G,R pixels
+                        // (as FreeRDP's BGR24). xrdp sends its screen this way; every such
+                        // bitmap used to be dropped, leaving a black screen.
+                        Ok(RlePixelFormat::Rgb24) => {
+                            bgr_to_rgb_in_place(&mut buf);
+                            image.apply_rgb24(&buf, &update.rectangle, true)?
+                        }
+
+                        // TODO: support other pixel formats…
+                        Ok(format @ (RlePixelFormat::Rgb8 | RlePixelFormat::Rgb15)) => {
+                            warn!("Received RLE-compressed bitmap with unsupported color depth: {format:?}");
+                            update.rectangle.clone()
+                        }
+
+                        Err(e) => {
+                            warn!("Invalid RLE-compressed bitmap: {e}");
+                            update.rectangle.clone()
+                        }
+                    }
+                }
+            } else {
+                // Uncompressed bitmap data is formatted as a bottom-up, left-to-right series of
+                // pixels. Each pixel is a whole number of bytes. Each row contains a multiple of
+                // four bytes (including up to three bytes of padding, as necessary).
+                // [MS-RDPBCGR] 2.2.9.1.1.3.1.2.2
+                trace!("Uncompressed raw bitmap");
+
+                let bpp = usize::from(update.bits_per_pixel);
+                let width = usize::from(update.width);
+                let bytes_per_pixel = bpp.div_ceil(8);
+                let row_bytes = width * bytes_per_pixel;
+                let padded_row_bytes = (row_bytes + 3) & !3;
+
+                if padded_row_bytes != row_bytes {
+                    // Strip per-row padding before passing to the bitmap apply functions,
+                    // which expect tightly packed pixel data.
+                    buf.clear();
+                    for row in update.bitmap_data.chunks(padded_row_bytes) {
+                        let end = row_bytes.min(row.len());
+                        buf.extend_from_slice(&row[..end]);
+                    }
+
+                    apply_uncompressed_bitmap(image, &mut buf, &update.rectangle, bpp)?
+                } else {
+                    buf.clear();
+                    buf.extend_from_slice(update.bitmap_data);
+                    apply_uncompressed_bitmap(image, &mut buf, &update.rectangle, bpp)?
+                }
+            };
+
+            match update_kind {
+                UpdateKind::Region(current) => update_kind = UpdateKind::Region(current.union(&update_rectangle)),
+                _ => update_kind = UpdateKind::Region(update_rectangle),
+            }
+        }
+
+        Ok(update_kind)
+    }
+
+    /// Process a slow-path graphics update (the body of a Share Data PDU of type
+    /// Update, [MS-RDPBCGR] 2.2.9.1.1.3): the client advertises fast-path output,
+    /// but some servers (xrdp) still send some updates over slow path, and an
+    /// unhandled Update PDU used to end the session.
+    ///
+    /// - Bitmap (TS_UPDATE_BITMAP_DATA, the same structure as the fast-path bitmap
+    ///   update) is drawn like a fast-path bitmap update.
+    /// - Palette and Synchronize are ignored (no 8 bpp palette mode; Synchronize
+    ///   carries no data).
+    /// - Orders are ignored with a warning: the client advertises no order support.
+    pub fn process_slow_path_update(
+        &mut self,
+        image: &mut DecodedImage,
+        data: &[u8],
+    ) -> SessionResult<Vec<UpdateKind>> {
+        const UPDATETYPE_ORDERS: u16 = 0x0000;
+        const UPDATETYPE_BITMAP: u16 = 0x0001;
+        const UPDATETYPE_PALETTE: u16 = 0x0002;
+        const UPDATETYPE_SYNCHRONIZE: u16 = 0x0003;
+
+        let Some(update_type) = data.get(..2).map(|b| u16::from_le_bytes([b[0], b[1]])) else {
+            warn!("Slow-path Update PDU too short ({} bytes), ignored", data.len());
+            return Ok(Vec::new());
+        };
+
+        match update_type {
+            UPDATETYPE_BITMAP => {
+                let bitmap_update = ironrdp_core::decode::<BitmapUpdateData<'_>>(data).map_err(SessionError::decode)?;
+                trace!("Received slow-path bitmap update");
+                Ok(vec![self.apply_bitmap_update(image, bitmap_update)?])
+            }
+            UPDATETYPE_PALETTE => {
+                debug!("Slow-path Palette update ignored");
+                Ok(Vec::new())
+            }
+            UPDATETYPE_SYNCHRONIZE => {
+                trace!("Slow-path Synchronize update");
+                Ok(Vec::new())
+            }
+            UPDATETYPE_ORDERS => {
+                warn!("Slow-path Orders update ignored (drawing orders are not supported)");
+                Ok(Vec::new())
+            }
+            other => {
+                warn!("Unknown slow-path update type {other:#06x}, ignored");
+                Ok(Vec::new())
+            }
+        }
     }
 
     fn process_surface_commands(
@@ -641,5 +698,34 @@ impl FrameMarkerProcessor {
                 Ok(())
             }
         }
+    }
+}
+
+/// Draw tightly packed, bottom-up uncompressed bitmap pixels
+/// ([MS-RDPBCGR] 2.2.9.1.1.3.1.2.2): 16 bpp (RGB565), 24 bpp (B,G,R) or 32 bpp (B,G,R,X).
+fn apply_uncompressed_bitmap(
+    image: &mut DecodedImage,
+    pixels: &mut [u8],
+    rectangle: &InclusiveRectangle,
+    bpp: usize,
+) -> SessionResult<InclusiveRectangle> {
+    match bpp {
+        16 => image.apply_rgb16_bitmap(pixels, rectangle),
+        24 => {
+            bgr_to_rgb_in_place(pixels);
+            image.apply_rgb24(pixels, rectangle, true)
+        }
+        32 => image.apply_rgb32_bitmap(pixels, PixelFormat::BgrX32, rectangle),
+        _ => {
+            warn!("Unsupported uncompressed bitmap depth: {bpp} bpp");
+            Ok(rectangle.clone())
+        }
+    }
+}
+
+/// Swap the first and third byte of each 3-byte pixel (B,G,R <-> R,G,B).
+fn bgr_to_rgb_in_place(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(3) {
+        pixel.swap(0, 2);
     }
 }

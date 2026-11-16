@@ -33,6 +33,11 @@ pub enum ProcessorOutput {
     /// [\[MS-RDPBCGR\] 2.2.15.1]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/de783158-8b01-4818-8fb0-62523a5b3490
     /// [`MultitransportResponsePdu`]: ironrdp_pdu::rdp::multitransport::MultitransportResponsePdu
     MultitransportRequest(MultitransportRequestPdu),
+    /// A slow-path graphics update (the body of a Share Data Update PDU). The
+    /// client advertises fast-path output, but some servers (xrdp) still send
+    /// updates over slow path; the active stage draws them with the fast-path
+    /// processor (see [`crate::fast_path::Processor::process_slow_path_update`]).
+    SlowPathUpdate(Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +158,7 @@ impl Processor {
                         let desc = DisconnectDescription::ErrorInfo(e);
                         Ok(vec![ProcessorOutput::Disconnect(desc)])
                     }
+                    ShareDataPdu::Update(data) => Ok(vec![ProcessorOutput::SlowPathUpdate(data)]),
                     ShareDataPdu::ShutdownDenied => {
                         debug!("ShutdownDenied received, session will be closed");
 
