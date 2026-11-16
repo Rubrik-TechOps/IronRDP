@@ -44,6 +44,11 @@ export function enableCredssp(enable: boolean): Extension {
     return new Extension('enable_credssp', enable);
 }
 
+/** Log in with the given credentials without the server's own login screen (INFO_AUTOLOGON). */
+export function autologon(enable: boolean): Extension {
+    return new Extension('autologon', enable);
+}
+
 export function performanceFlags(flags: number): Extension {
     return new Extension('performance_flags', flags);
 }

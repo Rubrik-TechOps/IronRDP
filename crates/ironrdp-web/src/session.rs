@@ -73,6 +73,9 @@ struct SessionBuilderInner {
 
     use_display_control: bool,
     enable_credssp: bool,
+    /// Set INFO_AUTOLOGON: log in with the given credentials without the server's own login
+    /// screen. Servers without NLA (xrdp) otherwise show their login dialog.
+    autologon: bool,
     outbound_message_size_limit: Option<usize>,
     performance_flags: u32,
 }
@@ -105,6 +108,7 @@ impl Default for SessionBuilderInner {
 
             use_display_control: false,
             enable_credssp: true,
+            autologon: false,
             outbound_message_size_limit: None,
             performance_flags: PerformanceFlags::default().bits(),
         }
@@ -235,6 +239,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             |kdc_proxy_url: String| { self.0.borrow_mut().kdc_proxy_url = Some(kdc_proxy_url) };
             |display_control: bool| { self.0.borrow_mut().use_display_control = display_control };
             |enable_credssp: bool| { self.0.borrow_mut().enable_credssp = enable_credssp };
+            |autologon: bool| { self.0.borrow_mut().autologon = autologon };
             |outbound_message_size_limit: f64| {
                 let limit = if outbound_message_size_limit >= 0.0 && outbound_message_size_limit <= f64::from(u32::MAX) {
                     #[expect(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -317,6 +322,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
 
         let enable_credssp = self.0.borrow().enable_credssp;
         config.enable_credssp = enable_credssp;
+        config.autologon = self.0.borrow().autologon;
 
         let (input_events_tx, input_events_rx) = mpsc::unbounded();
 
