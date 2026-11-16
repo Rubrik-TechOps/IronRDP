@@ -6,7 +6,7 @@ use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_graphics::pointer::{DecodedPointer, PointerBitmapTarget};
 use ironrdp_graphics::rdp6::BitmapStreamDecoder;
 use ironrdp_graphics::rle::RlePixelFormat;
-use ironrdp_pdu::bitmap::BitmapUpdateData;
+use ironrdp_pdu::bitmap::{BitmapData, BitmapUpdateData};
 use ironrdp_pdu::codecs::rfx::FrameAcknowledgePdu;
 use ironrdp_pdu::fast_path::{FastPathHeader, FastPathUpdate, FastPathUpdatePdu, Fragmentation};
 use ironrdp_pdu::geometry::{InclusiveRectangle, Rectangle as _};
@@ -319,7 +319,16 @@ impl Processor {
                         usize::from(update.width),
                         usize::from(update.height),
                     ) {
-                        Ok(()) => image.apply_rgb24(&buf, &update.rectangle, true)?,
+                        Ok(()) => {
+                            crop_to_rectangle(
+                                &mut buf,
+                                usize::from(update.width),
+                                usize::from(update.height),
+                                &update.rectangle,
+                                3,
+                            );
+                            image.apply_rgb24(&buf, &update.rectangle, true)?
+                        }
                         Err(err) => {
                             warn!("Invalid RDP6_BITMAP_STREAM: {err}");
                             update.rectangle.clone()
@@ -338,13 +347,29 @@ impl Processor {
                         usize::from(update.height),
                         usize::from(update.bits_per_pixel),
                     ) {
-                        Ok(RlePixelFormat::Rgb16) => image.apply_rgb16_bitmap(&buf, &update.rectangle)?,
+                        Ok(RlePixelFormat::Rgb16) => {
+                            crop_to_rectangle(
+                                &mut buf,
+                                usize::from(update.width),
+                                usize::from(update.height),
+                                &update.rectangle,
+                                2,
+                            );
+                            image.apply_rgb16_bitmap(&buf, &update.rectangle)?
+                        }
 
                         // 24 bpp interleaved RLE decodes to bottom-up rows of B,G,R pixels
                         // (as FreeRDP's BGR24). xrdp sends its screen this way; every such
                         // bitmap used to be dropped, leaving a black screen.
                         Ok(RlePixelFormat::Rgb24) => {
                             bgr_to_rgb_in_place(&mut buf);
+                            crop_to_rectangle(
+                                &mut buf,
+                                usize::from(update.width),
+                                usize::from(update.height),
+                                &update.rectangle,
+                                3,
+                            );
                             image.apply_rgb24(&buf, &update.rectangle, true)?
                         }
 
@@ -382,11 +407,11 @@ impl Processor {
                         buf.extend_from_slice(&row[..end]);
                     }
 
-                    apply_uncompressed_bitmap(image, &mut buf, &update.rectangle, bpp)?
+                    apply_uncompressed_bitmap(image, &mut buf, &update, bpp)?
                 } else {
                     buf.clear();
                     buf.extend_from_slice(update.bitmap_data);
-                    apply_uncompressed_bitmap(image, &mut buf, &update.rectangle, bpp)?
+                    apply_uncompressed_bitmap(image, &mut buf, &update, bpp)?
                 }
             };
 
@@ -705,10 +730,18 @@ impl FrameMarkerProcessor {
 /// ([MS-RDPBCGR] 2.2.9.1.1.3.1.2.2): 16 bpp (RGB565), 24 bpp (B,G,R) or 32 bpp (B,G,R,X).
 fn apply_uncompressed_bitmap(
     image: &mut DecodedImage,
-    pixels: &mut [u8],
-    rectangle: &InclusiveRectangle,
+    pixels: &mut Vec<u8>,
+    update: &BitmapData<'_>,
     bpp: usize,
 ) -> SessionResult<InclusiveRectangle> {
+    let rectangle = &update.rectangle;
+    crop_to_rectangle(
+        pixels,
+        usize::from(update.width),
+        usize::from(update.height),
+        rectangle,
+        bpp.div_ceil(8),
+    );
     match bpp {
         16 => image.apply_rgb16_bitmap(pixels, rectangle),
         24 => {
@@ -728,4 +761,47 @@ fn bgr_to_rgb_in_place(pixels: &mut [u8]) {
     for pixel in pixels.chunks_exact_mut(3) {
         pixel.swap(0, 2);
     }
+}
+
+/// Keep the part of a decoded bitmap that the destination rectangle shows.
+///
+/// `pixels` holds `bitmap_width` x `bitmap_height` tightly packed, bottom-up rows. The
+/// rectangle can be smaller: the bitmap's top-left lands on the rectangle's top-left and
+/// the rest is padding -- xrdp, for one, pads bitmap widths to a multiple of 4 (a 5-pixel
+/// glyph arrives as an 8-pixel bitmap). The apply functions split rows by the rectangle's
+/// width, so an unpadded buffer is required; otherwise every row is shifted and the image
+/// shears. Keeps the left `rectangle width` pixels of each row and the top `rectangle
+/// height` rows (the last ones, rows being bottom-up). No-op when the sizes match.
+fn crop_to_rectangle(
+    pixels: &mut Vec<u8>,
+    bitmap_width: usize,
+    bitmap_height: usize,
+    rectangle: &InclusiveRectangle,
+    bytes_per_pixel: usize,
+) {
+    let rect_width = usize::from(rectangle.width());
+    let rect_height = usize::from(rectangle.height());
+    if (bitmap_width, bitmap_height) == (rect_width, rect_height)
+        || rect_width > bitmap_width
+        || rect_height > bitmap_height
+    {
+        return;
+    }
+    let src_row = bitmap_width * bytes_per_pixel;
+    let dst_row = rect_width * bytes_per_pixel;
+    if pixels.len() < src_row * bitmap_height {
+        warn!(
+            len = pixels.len(),
+            bitmap_width, bitmap_height, "Bitmap data shorter than its size, not cropped"
+        );
+        return;
+    }
+    let first_row = bitmap_height - rect_height;
+    let cropped: Vec<u8> = pixels
+        .chunks_exact(src_row)
+        .skip(first_row)
+        .take(rect_height)
+        .flat_map(|row| row[..dst_row].iter().copied())
+        .collect();
+    *pixels = cropped;
 }

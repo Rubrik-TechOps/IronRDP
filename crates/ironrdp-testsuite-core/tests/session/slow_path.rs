@@ -155,3 +155,63 @@ fn uncompressed_32_bpp_bitmap_is_drawn() {
     assert_eq!(&pixel(&image, 1, 1)[..3], &EXPECTED[..3]);
     assert_eq!(&pixel(&image, 2, 1)[..3], &EXPECTED[..3]);
 }
+
+/// One bitmap of `width` x `height` pixels drawn into the rectangle (1,1)-(2,1).
+fn padded_bitmap_update(width: u16, height: u16, bpp: u16, flags: u16, bitmap: &[u8]) -> Vec<u8> {
+    let mut data = Vec::new();
+    let push = |d: &mut Vec<u8>, v: u16| d.extend_from_slice(&v.to_le_bytes());
+    push(&mut data, 0x0001); // UPDATETYPE_BITMAP
+    push(&mut data, 1); // numberRectangles
+    for v in [1u16, 1, 2, 1, width, height, bpp, flags] {
+        push(&mut data, v);
+    }
+    push(&mut data, u16::try_from(bitmap.len()).unwrap());
+    data.extend_from_slice(bitmap);
+    data
+}
+
+const A: [u8; 3] = [0x10, 0x20, 0x30]; // B,G,R on the wire -> R=0x30 G=0x20 B=0x10
+const B_PIXEL: [u8; 3] = [0x40, 0x50, 0x60];
+
+/// xrdp pads bitmap widths to a multiple of 4: a 2-pixel-wide rectangle arrives as a
+/// 4-pixel-wide bitmap. Splitting rows by the rectangle width sheared every such bitmap
+/// (illegible text); only the visible left part may be drawn.
+#[test]
+fn bitmap_wider_than_its_rectangle_is_cropped_not_sheared() {
+    // RLE: color run of 2 x A, then color run of 2 x B -> one row: A A B B
+    let mut rle = vec![0x62];
+    rle.extend_from_slice(&A);
+    rle.push(0x62);
+    rle.extend_from_slice(&B_PIXEL);
+    let update = padded_bitmap_update(4, 1, 24, 0x0001 | 0x0400, &rle);
+    let mut image = DecodedImage::new(PixelFormat::RgbA32, 4, 4);
+
+    processor().process_slow_path_update(&mut image, &update).unwrap();
+
+    assert_eq!(pixel(&image, 1, 1), EXPECTED);
+    assert_eq!(pixel(&image, 2, 1), EXPECTED);
+    assert_eq!(pixel(&image, 3, 1), [0, 0, 0, 0], "padding is not drawn");
+    assert_eq!(pixel(&image, 1, 2), [0, 0, 0, 0], "nothing leaks into the next row");
+}
+
+#[test]
+fn bitmap_larger_than_its_rectangle_keeps_the_top_left() {
+    // Uncompressed 24 bpp, 4x2, bottom-up: first the bottom row (4 x B), then the top row
+    // (A A B B). The 2x1 rectangle shows the top row's first two pixels.
+    let mut raw = Vec::new();
+    for _ in 0..4 {
+        raw.extend_from_slice(&B_PIXEL);
+    }
+    raw.extend_from_slice(&A);
+    raw.extend_from_slice(&A);
+    raw.extend_from_slice(&B_PIXEL);
+    raw.extend_from_slice(&B_PIXEL);
+    let update = padded_bitmap_update(4, 2, 24, 0, &raw);
+    let mut image = DecodedImage::new(PixelFormat::RgbA32, 4, 4);
+
+    processor().process_slow_path_update(&mut image, &update).unwrap();
+
+    assert_eq!(pixel(&image, 1, 1), EXPECTED);
+    assert_eq!(pixel(&image, 2, 1), EXPECTED);
+    assert_eq!(pixel(&image, 1, 2), [0, 0, 0, 0]);
+}
